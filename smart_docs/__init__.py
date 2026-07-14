@@ -1,0 +1,2 @@
+"""Smart Document Assistant package."""
+

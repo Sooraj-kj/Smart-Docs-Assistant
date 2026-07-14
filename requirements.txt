@@ -9,3 +9,6 @@ chromadb==1.5.9
 onnxruntime==1.23.2
 langchain-groq
 python-dotenv
+fastapi
+uvicorn[standard]
+python-multipart
