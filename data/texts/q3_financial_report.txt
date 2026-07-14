@@ -1,0 +1,22 @@
+Q3 2025 Financial Report — Internal Summary
+===========================================
+
+Revenue
+-------
+Total revenue for Q3 2025 was $4,800,000, representing a 12% increase over Q2 2025. The Enterprise segment contributed $3,200,000 (67% of total revenue), while the SMB segment contributed $1,600,000 (33% of total revenue).
+
+Operating Budget
+----------------
+The total operating budget approved for Q4 2025 is $2,000,000. Of this, $900,000 is allocated to Engineering, $500,000 to Sales & Marketing, $350,000 to Customer Success, and $250,000 to General & Administrative expenses.
+
+Headcount
+---------
+The company ended Q3 2025 with 214 employees, up from 198 at the end of Q2 2025. The Engineering team grew from 82 to 95 employees during the quarter.
+
+Key Risks
+---------
+Management identified three key risks for Q4 2025 planning: (1) increased customer acquisition costs in the SMB segment, (2) potential delays in the platform migration project affecting Enterprise renewals, and (3) currency fluctuation exposure in the EMEA region, which accounted for 18% of Q3 revenue.
+
+Outlook
+-------
+Management projects Q4 2025 revenue of approximately $5,300,000, assuming no material change in churn rates. The board has approved a contingency reserve of $150,000 for unplanned infrastructure costs related to the platform migration.
