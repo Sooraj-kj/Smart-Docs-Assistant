@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 import shutil
-from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import chromadb
-import fitz
+from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
+from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 
 from smart_docs.config import (
@@ -23,30 +28,37 @@ from smart_docs.schemas import DocumentInfo
 
 
 SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md"}
+SEMANTIC_WEIGHT = 0.7
+KEYWORD_WEIGHT = 0.3
 
 
-@dataclass
-class TextChunk:
-    text: str
-    metadata: dict[str, Any]
-
-
-class EmbeddingManager:
+class SentenceTransformerEmbeddings(Embeddings):
     def __init__(self, model_name: str = EMBEDDING_MODEL):
         try:
             self.model = SentenceTransformer(model_name, local_files_only=True)
         except Exception:
             self.model = SentenceTransformer(model_name)
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self.model.encode(texts, convert_to_numpy=True).tolist()
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
 
 
 class RAGService:
     def __init__(self):
-        self.embedding_manager = EmbeddingManager()
-        self.client = chromadb.PersistentClient(path=str(VECTOR_STORE_DIR))
-        self.collection = self.client.get_or_create_collection(name=COLLECTION_NAME)
+        self.embeddings = SentenceTransformerEmbeddings()
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+        self.vector_store = Chroma(
+            collection_name=COLLECTION_NAME,
+            embedding_function=self.embeddings,
+            persist_directory=str(VECTOR_STORE_DIR),
+        )
 
     def ingest_existing_samples(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -75,44 +87,20 @@ class RAGService:
         if not chunks:
             return 0
 
-        texts = [chunk.text for chunk in chunks]
-        metadatas = [chunk.metadata for chunk in chunks]
-        ids = [chunk.metadata["chunk_id"] for chunk in chunks]
-        embeddings = self.embedding_manager.embed_texts(texts)
-
-        self.collection.upsert(
-            ids=ids,
-            documents=texts,
-            metadatas=metadatas,
-            embeddings=embeddings,
+        self.vector_store.add_texts(
+            texts=[chunk.page_content for chunk in chunks],
+            metadatas=[chunk.metadata for chunk in chunks],
+            ids=[str(chunk.metadata["chunk_id"]) for chunk in chunks],
         )
         return len(chunks)
 
     def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
-        query_embedding = self.embedding_manager.embed_texts([query])[0]
-        result = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"],
-        )
-
-        documents = result.get("documents", [[]])[0]
-        metadatas = result.get("metadatas", [[]])[0]
-        distances = result.get("distances", [[]])[0]
-
-        matches = []
-        for document, metadata, distance in zip(documents, metadatas, distances):
-            matches.append(
-                {
-                    "text": document,
-                    "metadata": metadata,
-                    "score": float(distance),
-                }
-            )
-        return matches
+        semantic_matches = self._semantic_search(query, top_k * 4)
+        keyword_matches = self._keyword_search(query, top_k * 4)
+        return self._merge_ranked_matches(semantic_matches, keyword_matches, top_k)
 
     def list_documents(self) -> list[DocumentInfo]:
-        raw = self.collection.get(include=["metadatas"])
+        raw = self.vector_store.get(include=["metadatas"])
         grouped: dict[str, dict[str, Any]] = {}
 
         for metadata in raw.get("metadatas", []):
@@ -132,66 +120,158 @@ class RAGService:
 
         return [DocumentInfo(**item) for item in sorted(grouped.values(), key=lambda x: x["document_name"])]
 
-    def _load_and_chunk(self, path: Path) -> list[TextChunk]:
+    def _load_and_chunk(self, path: Path) -> list[Document]:
+        documents = self._load_documents(path)
+        chunks = self.text_splitter.split_documents(documents)
+        chunk_counts: dict[tuple[str, int], int] = {}
+
+        for chunk in chunks:
+            page = int(chunk.metadata.get("page", 0))
+            key = (str(chunk.metadata["document_name"]), page)
+            chunk_index = chunk_counts.get(key, 0)
+            chunk_counts[key] = chunk_index + 1
+            chunk.page_content = " ".join(chunk.page_content.split())
+            chunk.metadata["chunk_index"] = chunk_index
+            chunk.metadata["chunk_id"] = self._chunk_id(path, page, chunk_index, chunk.page_content)
+
+        return [chunk for chunk in chunks if chunk.page_content]
+
+    @staticmethod
+    def _load_documents(path: Path) -> list[Document]:
         suffix = path.suffix.lower()
         if suffix == ".pdf":
-            pages = self._read_pdf_pages(path)
+            documents = PyMuPDFLoader(str(path)).load()
         elif suffix in {".txt", ".md"}:
-            pages = [(None, path.read_text(encoding="utf-8", errors="replace"))]
+            documents = TextLoader(str(path), encoding="utf-8", autodetect_encoding=True).load()
         else:
             raise ValueError(f"Unsupported file type: {suffix}")
 
-        chunks: list[TextChunk] = []
-        for page_number, text in pages:
-            for chunk_index, chunk_text in enumerate(self._split_text(text)):
-                chunk_id = self._chunk_id(path, page_number, chunk_index, chunk_text)
-                page_value = page_number if page_number is not None else 0
-                chunks.append(
-                    TextChunk(
-                        text=chunk_text,
-                        metadata={
-                            "chunk_id": chunk_id,
-                            "document_name": path.name,
-                            "source_path": str(path),
-                            "file_type": suffix.lstrip("."),
-                            "page": page_value,
-                            "chunk_index": chunk_index,
-                        },
-                    )
-                )
-        return chunks
+        for document in documents:
+            page = int(document.metadata.get("page", 0)) + 1 if suffix == ".pdf" else 0
+            document.metadata = {
+                "document_name": path.name,
+                "source_path": str(path),
+                "file_type": suffix.lstrip("."),
+                "page": page,
+            }
+        return documents
+
+    def _semantic_search(self, query: str, top_k: int) -> dict[str, dict[str, Any]]:
+        matches: dict[str, dict[str, Any]] = {}
+        for document, distance in self.vector_store.similarity_search_with_score(query, k=top_k):
+            chunk_id = str(document.metadata.get("chunk_id", ""))
+            if not chunk_id:
+                continue
+            matches[chunk_id] = {
+                "text": document.page_content,
+                "metadata": document.metadata,
+                "semantic_score": 1.0 / (1.0 + float(distance)),
+            }
+        return matches
+
+    def _keyword_search(self, query: str, top_k: int) -> dict[str, dict[str, Any]]:
+        raw = self.vector_store.get(include=["documents", "metadatas"])
+        documents = raw.get("documents", [])
+        metadatas = raw.get("metadatas", [])
+        if not documents or not metadatas:
+            return {}
+
+        query_terms = self._tokenize(query)
+        if not query_terms:
+            return {}
+
+        tokenized_documents = [self._tokenize(document or "") for document in documents]
+        scores = self._bm25_scores(query_terms, tokenized_documents)
+        ranked_indexes = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:top_k]
+
+        matches: dict[str, dict[str, Any]] = {}
+        for index in ranked_indexes:
+            if scores[index] <= 0:
+                continue
+            metadata = metadatas[index] or {}
+            chunk_id = str(metadata.get("chunk_id", ""))
+            if not chunk_id:
+                continue
+            matches[chunk_id] = {
+                "text": documents[index],
+                "metadata": metadata,
+                "keyword_score": scores[index],
+            }
+        return matches
 
     @staticmethod
-    def _read_pdf_pages(path: Path) -> list[tuple[int, str]]:
-        pages: list[tuple[int, str]] = []
-        with fitz.open(path) as pdf:
-            for index, page in enumerate(pdf, start=1):
-                text = page.get_text("text").strip()
-                if text:
-                    pages.append((index, text))
-        return pages
+    def _merge_ranked_matches(
+        semantic_matches: dict[str, dict[str, Any]],
+        keyword_matches: dict[str, dict[str, Any]],
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        max_keyword_score = max(
+            (match.get("keyword_score", 0.0) for match in keyword_matches.values()),
+            default=0.0,
+        )
+        all_chunk_ids = set(semantic_matches) | set(keyword_matches)
+        merged = []
+
+        for chunk_id in all_chunk_ids:
+            semantic_match = semantic_matches.get(chunk_id, {})
+            keyword_match = keyword_matches.get(chunk_id, {})
+            keyword_score = float(keyword_match.get("keyword_score", 0.0))
+            normalized_keyword_score = keyword_score / max_keyword_score if max_keyword_score else 0.0
+            combined_score = (
+                SEMANTIC_WEIGHT * float(semantic_match.get("semantic_score", 0.0))
+                + KEYWORD_WEIGHT * normalized_keyword_score
+            )
+            best_match = semantic_match or keyword_match
+            merged.append(
+                {
+                    "text": best_match["text"],
+                    "metadata": best_match["metadata"],
+                    "score": combined_score,
+                    "semantic_score": semantic_match.get("semantic_score", 0.0),
+                    "keyword_score": keyword_score,
+                }
+            )
+
+        return sorted(merged, key=lambda match: match["score"], reverse=True)[:top_k]
 
     @staticmethod
-    def _split_text(text: str) -> list[str]:
-        normalized = " ".join(text.split())
-        if not normalized:
+    def _bm25_scores(
+        query_terms: list[str],
+        tokenized_documents: list[list[str]],
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> list[float]:
+        document_count = len(tokenized_documents)
+        if document_count == 0:
             return []
 
-        chunks = []
-        start = 0
-        while start < len(normalized):
-            end = min(start + CHUNK_SIZE, len(normalized))
-            if end < len(normalized):
-                boundary = normalized.rfind(" ", start, end)
-                if boundary > start + CHUNK_SIZE // 2:
-                    end = boundary
-            chunks.append(normalized[start:end].strip())
-            if end >= len(normalized):
-                break
-            start = max(end - CHUNK_OVERLAP, 0)
-        return chunks
+        average_length = sum(len(document) for document in tokenized_documents) / document_count
+        document_frequencies = Counter(
+            term
+            for document in tokenized_documents
+            for term in set(document)
+        )
+
+        scores = []
+        for document in tokenized_documents:
+            term_frequencies = Counter(document)
+            document_length = len(document) or 1
+            score = 0.0
+            for term in query_terms:
+                if term not in term_frequencies:
+                    continue
+                idf = math.log(1 + (document_count - document_frequencies[term] + 0.5) / (document_frequencies[term] + 0.5))
+                frequency = term_frequencies[term]
+                denominator = frequency + k1 * (1 - b + b * document_length / (average_length or 1))
+                score += idf * (frequency * (k1 + 1)) / denominator
+            scores.append(score)
+        return scores
 
     @staticmethod
-    def _chunk_id(path: Path, page: int | None, chunk_index: int, text: str) -> str:
+    def _tokenize(text: str) -> list[str]:
+        return [token for token in re.findall(r"[a-zA-Z0-9]+", text.lower()) if len(token) > 1]
+
+    @staticmethod
+    def _chunk_id(path: Path, page: int, chunk_index: int, text: str) -> str:
         digest = hashlib.sha1(f"{path.name}:{page}:{chunk_index}:{text}".encode("utf-8")).hexdigest()
         return digest

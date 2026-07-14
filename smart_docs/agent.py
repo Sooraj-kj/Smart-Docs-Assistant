@@ -4,14 +4,26 @@ import os
 import re
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langchain_groq import ChatGroq
 
 from smart_docs.chat_store import SQLiteChatStore
 from smart_docs.config import DEFAULT_LLM_MODEL, DEFAULT_TOP_K
 from smart_docs.rag import RAGService
 from smart_docs.schemas import ChatResponse, ChatSession, HistoryItem, SourceCitation
-from smart_docs.tools import calculator, current_datetime, search_documents
+from smart_docs.tools import CalculatorError, calculator, current_datetime, search_documents
+
+
+AGENT_SYSTEM_PROMPT = (
+    "You are a Smart Document Assistant. Answer using only retrieved document context and tool outputs. "
+    "Use search_documents for questions about uploaded documents, policies, reports, manuals, budgets, "
+    "security, leave, or follow-up references. Use calculator for arithmetic. Use current_datetime for "
+    "date or time questions. A query can require multiple tools, such as document search followed by "
+    "calculation. Cite document answers as [document_name, page/chunk]. If the retrieved context does not "
+    "contain the answer, say you don't know based on the provided documents. Be concise."
+)
 
 
 class SmartDocumentAgent:
@@ -23,6 +35,66 @@ class SmartDocumentAgent:
     def chat(self, session_id: str, message: str, top_k: int = DEFAULT_TOP_K) -> ChatResponse:
         self.store.ensure_session(session_id)
         history = self.store.get_history(session_id)
+
+        if self.llm is not None:
+            response = self._chat_with_langchain_agent(session_id, message, history, top_k)
+            if response is not None:
+                return response
+
+        return self._chat_with_rule_planner(session_id, message, history, top_k)
+
+    def _chat_with_langchain_agent(
+        self,
+        session_id: str,
+        message: str,
+        history: list[HistoryItem],
+        top_k: int,
+    ) -> ChatResponse | None:
+        tools = self._build_langchain_tools(message, top_k)
+        agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            system_prompt=AGENT_SYSTEM_PROMPT,
+        )
+
+        history_text = "\n".join(f"{item.role}: {item.content}" for item in history[-6:])
+        prompt = (
+            f"Conversation history:\n{history_text or 'No prior messages.'}\n\n"
+            f"User question: {message}"
+        )
+
+        try:
+            result = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+        except Exception:
+            return None
+
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        answer = self._last_ai_message_content(messages)
+        if not answer:
+            return None
+
+        trace, retrieved = self._extract_agent_trace(messages)
+        self.store.append_messages(
+            session_id,
+            [
+                HistoryItem(role="user", content=message),
+                HistoryItem(role="assistant", content=answer),
+            ],
+        )
+        return ChatResponse(
+            session_id=session_id,
+            answer=answer,
+            sources=self._citations(retrieved),
+            trace=trace,
+        )
+
+    def _chat_with_rule_planner(
+        self,
+        session_id: str,
+        message: str,
+        history: list[HistoryItem],
+        top_k: int,
+    ) -> ChatResponse:
         trace: list[dict[str, Any]] = []
         retrieved: list[dict[str, Any]] = []
         calculation_result: float | None = None
@@ -43,12 +115,16 @@ class SmartDocumentAgent:
 
         expression = self._extract_math_expression(message, retrieved)
         if expression:
-            calculation_result = calculator(expression)
+            try:
+                calculation_result = calculator(expression)
+                calculation_output: float | dict[str, str] = calculation_result
+            except CalculatorError as exc:
+                calculation_output = {"error": str(exc)}
             trace.append(
                 {
                     "tool": "calculator",
                     "input": {"expression": expression},
-                    "output": calculation_result,
+                    "output": calculation_output,
                 }
             )
 
@@ -90,6 +166,94 @@ class SmartDocumentAgent:
 
     def list_sessions(self) -> list[ChatSession]:
         return self.store.list_sessions()
+
+    def _build_langchain_tools(self, message: str, default_top_k: int) -> list[StructuredTool]:
+        def search_documents_tool(query: str, top_k: int = default_top_k) -> tuple[str, dict[str, Any]]:
+            """Search uploaded documents semantically and return grounded context chunks."""
+            retrieved = search_documents(self.rag, query, top_k)
+            if not self._has_query_evidence(message, retrieved):
+                retrieved = []
+            content = self._format_context(retrieved) or "No relevant document context found."
+            artifact = {
+                "tool": "search_documents",
+                "input": {"query": query, "top_k": top_k},
+                "output": self._trace_sources(retrieved),
+                "retrieved": retrieved,
+            }
+            return content, artifact
+
+        def calculator_tool(expression: str) -> tuple[str, dict[str, Any]]:
+            """Evaluate a numeric math expression, including percentages."""
+            try:
+                result = calculator(expression)
+                output: float | dict[str, str] = result
+                content = f"{result:g}"
+            except CalculatorError as exc:
+                output = {"error": str(exc)}
+                content = str(exc)
+            return content, {
+                "tool": "calculator",
+                "input": {"expression": expression},
+                "output": output,
+            }
+
+        def current_datetime_tool(timezone: str = "Asia/Kolkata") -> tuple[str, dict[str, Any]]:
+            """Return the current date and time for a timezone."""
+            result = current_datetime(timezone)
+            return result, {
+                "tool": "current_datetime",
+                "input": {"timezone": timezone},
+                "output": result,
+            }
+
+        return [
+            StructuredTool.from_function(
+                func=search_documents_tool,
+                name="search_documents",
+                description="Search uploaded documents with semantic retrieval. Use for document-grounded questions.",
+                response_format="content_and_artifact",
+            ),
+            StructuredTool.from_function(
+                func=calculator_tool,
+                name="calculator",
+                description="Evaluate arithmetic expressions such as 15/100*2000000.",
+                response_format="content_and_artifact",
+            ),
+            StructuredTool.from_function(
+                func=current_datetime_tool,
+                name="current_datetime",
+                description="Get the current date and time for a timezone.",
+                response_format="content_and_artifact",
+            ),
+        ]
+
+    @staticmethod
+    def _last_ai_message_content(messages: list[Any]) -> str:
+        for message in reversed(messages):
+            if isinstance(message, AIMessage) and isinstance(message.content, str):
+                return message.content
+        return ""
+
+    @staticmethod
+    def _extract_agent_trace(messages: list[Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        trace: list[dict[str, Any]] = []
+        retrieved: list[dict[str, Any]] = []
+
+        for message in messages:
+            if not isinstance(message, ToolMessage) or not isinstance(message.artifact, dict):
+                continue
+            artifact = message.artifact
+            trace.append(
+                {
+                    "tool": artifact.get("tool", message.name or "unknown"),
+                    "input": artifact.get("input", {}),
+                    "output": artifact.get("output"),
+                }
+            )
+            if artifact.get("tool") == "search_documents":
+                retrieved = artifact.get("retrieved", [])
+
+        return trace, retrieved
 
     @staticmethod
     def _build_llm() -> ChatGroq | None:
@@ -325,6 +489,8 @@ class SmartDocumentAgent:
                 "page": item["metadata"].get("page"),
                 "chunk_index": item["metadata"].get("chunk_index"),
                 "score": item.get("score"),
+                "semantic_score": item.get("semantic_score"),
+                "keyword_score": item.get("keyword_score"),
             }
             for item in retrieved
         ]

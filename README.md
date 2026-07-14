@@ -7,7 +7,7 @@ A RAG-powered AI assistant that ingests documents, answers grounded questions wi
 - Upload and ingest PDF, TXT, and Markdown files.
 - Chunk documents with overlapping character windows.
 - Generate local sentence-transformer embeddings.
-- Store and query embeddings with Chroma.
+- Store embeddings with Chroma and retrieve with a hybrid semantic + BM25 keyword strategy.
 - Answer questions using retrieved context and source citations.
 - Agent tool trace showing which tools were called.
 - Calculator support for multi-step questions such as "What is 15% of the operating budget?"
@@ -22,10 +22,10 @@ A RAG-powered AI assistant that ingests documents, answers grounded questions wi
 Upload/API
    |
    v
-Document loaders -> Chunker -> SentenceTransformer embeddings -> Chroma vector DB
+LangChain loaders -> RecursiveCharacterTextSplitter -> SentenceTransformer embeddings -> Chroma vector DB
                                                               |
                                                               v
-User chat -> Agent planner -> tools: search_documents, calculator, current_datetime
+User chat -> LangChain agent -> tools: search_documents, calculator, current_datetime
                                                               |
                                                               v
                                                    Groq LLM grounded answer
@@ -126,15 +126,15 @@ This runs five sample questions and checks for expected keywords. It is intentio
 
 ## Design Decisions
 
-**Chunking strategy:** Documents are normalized and split into 1000-character chunks with 200-character overlap. This keeps each chunk small enough for focused retrieval while preserving neighboring context across section boundaries.
+**Chunking strategy:** Documents are loaded with LangChain loaders and split with `RecursiveCharacterTextSplitter` into 1000-character chunks with 200-character overlap. This keeps each chunk small enough for focused retrieval while preserving neighboring context across section boundaries.
 
 **Embedding model:** `all-MiniLM-L6-v2` from `sentence-transformers` is used locally. It is fast, inexpensive, and good enough for small policy/report/manual documents.
 
-**Vector database:** Chroma is used as a local persistent vector store under `data/vector_store`. It is simple to run for a machine task and does not require external infrastructure.
+**Vector database:** Chroma is used through LangChain's vector store wrapper as a local persistent vector store under `data/vector_store`. It is simple to run for a machine task and does not require external infrastructure.
 
-**Retrieval:** The retriever embeds the user query and returns top-k semantically similar chunks. Responses include document name, page when available, chunk ID, and score.
+**Retrieval:** The retriever combines Chroma semantic similarity with a lightweight BM25 keyword scorer over stored chunks. Semantic candidates and keyword candidates are merged with a weighted score, which improves exact-term queries while keeping semantic matching for natural-language questions. Responses include document name, page when available, chunk ID, and score.
 
-**Agent approach:** The agent uses lightweight rule-based planning to decide when to call `search_documents`, `calculator`, and `current_datetime`, then sends the retrieved context and tool outputs to the LLM. This makes the tool trace easy to expose and reason about.
+**Agent approach:** The agent uses LangChain `create_agent` with three structured tools: `search_documents`, `calculator`, and `current_datetime`. Tool artifacts are converted into a user-visible trace. If no LLM key is configured or the agent call fails, the app falls back to a lightweight rule-based planner so local development still works.
 
 **Memory:** Conversation history is stored in SQLite at `data/chat_history.sqlite3` per `session_id`. Recent turns are included in retrieval and response generation so follow-up questions have context, and previous sessions remain available after server restarts.
 
@@ -142,6 +142,6 @@ This runs five sample questions and checks for expected keywords. It is intentio
 
 - Chat history is local to the machine because it is stored in a SQLite file under `data/`.
 - The current planner is intentionally simple; a production version could use model-native function calling.
-- Retrieval is semantic only. Hybrid BM25 plus reranking would improve exact phrase matching.
+- Retrieval uses a lightweight in-process BM25 implementation. For larger datasets, a dedicated search engine or reranker would be more scalable.
 - Uploaded files are copied into local storage; object storage would be better for production.
 - The fallback answer is extractive and less polished when no LLM key is configured.
