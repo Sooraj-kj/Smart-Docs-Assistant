@@ -12,3 +12,5 @@ python-dotenv
 fastapi
 uvicorn[standard]
 python-multipart
+requests
+streamlit

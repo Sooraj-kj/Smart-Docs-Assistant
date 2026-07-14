@@ -13,6 +13,7 @@ A RAG-powered AI assistant that ingests documents, answers grounded questions wi
 - Calculator support for multi-step questions such as "What is 15% of the operating budget?"
 - Conversation memory by `session_id`.
 - FastAPI REST API.
+- Streamlit frontend.
 - Small keyword-based evaluation script.
 
 ## Architecture
@@ -50,6 +51,8 @@ If `GROQ_API_KEY` is not set, the API still runs with a simple extractive fallba
 
 ## Run
 
+Start the FastAPI backend:
+
 ```bash
 python main.py
 ```
@@ -61,6 +64,18 @@ http://localhost:8000/docs
 ```
 
 The app ingests the included sample documents from `data/texts` and `data/pdf` on startup.
+
+Start the Streamlit frontend in a second terminal:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Open the UI:
+
+```text
+http://localhost:8501
+```
 
 ## API
 
