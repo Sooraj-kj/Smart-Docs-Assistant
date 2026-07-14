@@ -2,26 +2,27 @@ from __future__ import annotations
 
 import os
 import re
-from collections import defaultdict
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
+from smart_docs.chat_store import SQLiteChatStore
 from smart_docs.config import DEFAULT_LLM_MODEL, DEFAULT_TOP_K
 from smart_docs.rag import RAGService
-from smart_docs.schemas import ChatResponse, HistoryItem, SourceCitation
+from smart_docs.schemas import ChatResponse, ChatSession, HistoryItem, SourceCitation
 from smart_docs.tools import calculator, current_datetime, search_documents
 
 
 class SmartDocumentAgent:
     def __init__(self, rag: RAGService):
         self.rag = rag
-        self.memory: dict[str, list[HistoryItem]] = defaultdict(list)
+        self.store = SQLiteChatStore()
         self.llm = self._build_llm()
 
     def chat(self, session_id: str, message: str, top_k: int = DEFAULT_TOP_K) -> ChatResponse:
-        history = self.memory[session_id]
+        self.store.ensure_session(session_id)
+        history = self.store.get_history(session_id)
         trace: list[dict[str, Any]] = []
         retrieved: list[dict[str, Any]] = []
         calculation_result: float | None = None
@@ -69,11 +70,12 @@ class SmartDocumentAgent:
             current_time=now,
         )
 
-        history.extend(
+        self.store.append_messages(
+            session_id,
             [
                 HistoryItem(role="user", content=message),
                 HistoryItem(role="assistant", content=answer),
-            ]
+            ],
         )
 
         return ChatResponse(
@@ -84,7 +86,10 @@ class SmartDocumentAgent:
         )
 
     def get_history(self, session_id: str) -> list[HistoryItem]:
-        return self.memory[session_id]
+        return self.store.get_history(session_id)
+
+    def list_sessions(self) -> list[ChatSession]:
+        return self.store.list_sessions()
 
     @staticmethod
     def _build_llm() -> ChatGroq | None:

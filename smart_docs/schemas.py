@@ -19,8 +19,16 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     answer: str
-    sources: list[SourceCitation] = []
-    trace: list[dict[str, Any]] = []
+    sources: list[SourceCitation] = Field(default_factory=list)
+    trace: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChatSession(BaseModel):
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    message_count: int
 
 
 class DocumentInfo(BaseModel):
@@ -33,4 +41,3 @@ class DocumentInfo(BaseModel):
 class HistoryItem(BaseModel):
     role: str
     content: str
-

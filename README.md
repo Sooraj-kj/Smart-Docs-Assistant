@@ -11,7 +11,7 @@ A RAG-powered AI assistant that ingests documents, answers grounded questions wi
 - Answer questions using retrieved context and source citations.
 - Agent tool trace showing which tools were called.
 - Calculator support for multi-step questions such as "What is 15% of the operating budget?"
-- Conversation memory by `session_id`.
+- Persistent conversation memory by `session_id` with SQLite-backed chat history.
 - FastAPI REST API.
 - Streamlit frontend.
 - Small keyword-based evaluation script.
@@ -136,11 +136,11 @@ This runs five sample questions and checks for expected keywords. It is intentio
 
 **Agent approach:** The agent uses lightweight rule-based planning to decide when to call `search_documents`, `calculator`, and `current_datetime`, then sends the retrieved context and tool outputs to the LLM. This makes the tool trace easy to expose and reason about.
 
-**Memory:** Conversation history is stored in memory per `session_id`. Recent turns are included in retrieval and response generation so follow-up questions have context.
+**Memory:** Conversation history is stored in SQLite at `data/chat_history.sqlite3` per `session_id`. Recent turns are included in retrieval and response generation so follow-up questions have context, and previous sessions remain available after server restarts.
 
 ## Known Limitations
 
-- Memory is in-process only and resets when the server restarts.
+- Chat history is local to the machine because it is stored in a SQLite file under `data/`.
 - The current planner is intentionally simple; a production version could use model-native function calling.
 - Retrieval is semantic only. Hybrid BM25 plus reranking would improve exact phrase matching.
 - Uploaded files are copied into local storage; object storage would be better for production.

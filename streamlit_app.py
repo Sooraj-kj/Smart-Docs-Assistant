@@ -17,14 +17,23 @@ st.set_page_config(
 
 
 def init_state() -> None:
+    st.session_state.setdefault("api_base_url", DEFAULT_API_URL)
     if "session_id" not in st.session_state:
         st.session_state.session_id = f"session-{uuid.uuid4().hex[:8]}"
+    if "selected_session_id" not in st.session_state:
+        st.session_state.selected_session_id = st.session_state.session_id
+    if "session_id_input" not in st.session_state:
+        st.session_state.session_id_input = st.session_state.session_id
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "last_trace" not in st.session_state:
         st.session_state.last_trace = []
     if "last_sources" not in st.session_state:
         st.session_state.last_sources = []
+    if "sessions" not in st.session_state:
+        st.session_state.sessions = []
+    if "sessions_loaded" not in st.session_state:
+        st.session_state.sessions_loaded = False
     if "documents" not in st.session_state:
         st.session_state.documents = []
     if "uploader_key" not in st.session_state:
@@ -65,6 +74,54 @@ def list_documents() -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+def list_chat_sessions(show_errors: bool = True) -> list[dict[str, Any]]:
+    data, error = request_json("GET", "/chat/sessions")
+    if error:
+        if show_errors:
+            st.warning(error)
+        return []
+    return data if isinstance(data, list) else []
+
+
+def load_chat_history(session_id: str, show_errors: bool = True) -> None:
+    data, error = request_json("GET", f"/chat/{session_id}/history")
+    if error:
+        if show_errors:
+            st.warning(error)
+        st.session_state.messages = []
+        return
+    history = data if isinstance(data, list) else []
+    st.session_state.messages = [
+        {"role": str(item.get("role", "assistant")), "content": str(item.get("content", ""))}
+        for item in history
+    ]
+    st.session_state.last_trace = []
+    st.session_state.last_sources = []
+
+
+def refresh_chat_sessions(show_errors: bool = True) -> None:
+    st.session_state.sessions = list_chat_sessions(show_errors=show_errors)
+    st.session_state.sessions_loaded = True
+
+
+def switch_session(session_id: str) -> None:
+    st.session_state.session_id = session_id
+    st.session_state.selected_session_id = session_id
+    st.session_state.session_id_input = session_id
+    load_chat_history(session_id)
+
+
+def switch_selected_session() -> None:
+    switch_session(st.session_state.selected_session_id)
+
+
+def open_session_from_input() -> None:
+    session_id = st.session_state.session_id_input.strip()
+    if not session_id:
+        return
+    switch_session(session_id)
+
+
 def upload_document(uploaded_file: Any) -> None:
     files = {
         "file": (
@@ -99,6 +156,7 @@ def send_chat(message: str, top_k: int) -> None:
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.session_state.last_sources = data.get("sources", [])
     st.session_state.last_trace = data.get("trace", [])
+    refresh_chat_sessions(show_errors=False)
 
 
 def render_sources(sources: list[dict[str, Any]]) -> None:
@@ -117,6 +175,15 @@ def render_sources(sources: list[dict[str, Any]]) -> None:
         st.caption(f"chunk_id: {source.get('chunk_id', '')}")
 
 
+def render_trace_value(value: Any) -> None:
+    if isinstance(value, (dict, list)):
+        st.json(value)
+    elif value is None:
+        st.caption("None")
+    else:
+        st.code(str(value), language="text")
+
+
 def render_trace(trace: list[dict[str, Any]]) -> None:
     if not trace:
         st.info("No tools were called for the latest answer.")
@@ -125,13 +192,15 @@ def render_trace(trace: list[dict[str, Any]]) -> None:
     for step in trace:
         with st.expander(f"Tool: {step.get('tool', 'unknown')}", expanded=False):
             st.markdown("**Input**")
-            st.json(step.get("input", {}))
+            render_trace_value(step.get("input", {}))
             st.markdown("**Output**")
-            st.json(step.get("output", {}))
+            render_trace_value(step.get("output"))
 
 
 def new_session() -> None:
     st.session_state.session_id = f"session-{uuid.uuid4().hex[:8]}"
+    st.session_state.selected_session_id = st.session_state.session_id
+    st.session_state.session_id_input = st.session_state.session_id
     st.session_state.messages = []
     st.session_state.last_trace = []
     st.session_state.last_sources = []
@@ -149,19 +218,42 @@ with st.sidebar:
 
     st.text_input(
         "FastAPI backend URL",
-        value=DEFAULT_API_URL,
         key="api_base_url",
         help="Start the backend first with python main.py.",
     )
 
-    if st.button("Check backend", use_container_width=True):
+    if st.button("Check backend", width="stretch"):
         if health_check():
             st.success("Backend is online.")
 
     st.divider()
 
-    st.text_input("Session ID", key="session_id")
-    st.button("New session", use_container_width=True, on_click=new_session)
+    if not st.session_state.sessions_loaded:
+        refresh_chat_sessions(show_errors=False)
+
+    st.subheader("Chats")
+    session_labels = {
+        session["session_id"]: (
+            f"{session.get('title') or session['session_id']} "
+            f"({session.get('message_count', 0)} messages)"
+        )
+        for session in st.session_state.sessions
+    }
+    session_options = list(session_labels)
+    if st.session_state.session_id not in session_options:
+        session_options.insert(0, st.session_state.session_id)
+
+    st.selectbox(
+        "Session history",
+        session_options,
+        key="selected_session_id",
+        format_func=lambda session_id: session_labels.get(session_id, session_id),
+        on_change=switch_selected_session,
+    )
+    st.text_input("Open or create session ID", key="session_id_input")
+    st.button("Open session", width="stretch", on_click=open_session_from_input)
+    st.button("New session", width="stretch", on_click=new_session)
+    st.button("Refresh history", width="stretch", on_click=refresh_chat_sessions)
 
     st.divider()
 
@@ -171,13 +263,13 @@ with st.sidebar:
         type=["pdf", "txt", "md"],
         key=f"uploader_{st.session_state.uploader_key}",
     )
-    if uploaded and st.button("Upload document", use_container_width=True):
+    if uploaded and st.button("Upload document", width="stretch"):
         upload_document(uploaded)
 
     st.divider()
 
     st.subheader("Documents")
-    st.button("Refresh documents", use_container_width=True, on_click=refresh_documents)
+    st.button("Refresh documents", width="stretch", on_click=refresh_documents)
 
     docs = st.session_state.documents
     if docs:
@@ -200,7 +292,7 @@ examples = [
 ]
 
 for col, example in zip(example_cols, examples):
-    if col.button(example, use_container_width=True):
+    if col.button(example, width="stretch"):
         st.session_state.messages.append({"role": "user", "content": example})
         send_chat(example, top_k=5)
         st.rerun()

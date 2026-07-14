@@ -7,7 +7,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from smart_docs.agent import SmartDocumentAgent
 from smart_docs.rag import RAGService, SUPPORTED_EXTENSIONS
-from smart_docs.schemas import ChatRequest, ChatResponse, DocumentInfo, HistoryItem
+from smart_docs.schemas import ChatRequest, ChatResponse, ChatSession, DocumentInfo, HistoryItem
 
 app = FastAPI(title="Smart Document Assistant", version="1.0.0")
 
@@ -62,6 +62,11 @@ def chat(request: ChatRequest) -> ChatResponse:
         message=request.message,
         top_k=request.top_k,
     )
+
+
+@app.get("/chat/sessions", response_model=list[ChatSession])
+def chat_sessions() -> list[ChatSession]:
+    return agent.list_sessions()
 
 
 @app.get("/chat/{session_id}/history", response_model=list[HistoryItem])

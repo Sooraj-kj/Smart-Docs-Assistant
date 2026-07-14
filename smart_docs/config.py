@@ -8,6 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 VECTOR_STORE_DIR = DATA_DIR / "vector_store"
+CHAT_DB_PATH = DATA_DIR / "chat_history.sqlite3"
 
 COLLECTION_NAME = "smart_documents"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
