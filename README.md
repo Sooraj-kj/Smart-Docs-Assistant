@@ -51,6 +51,30 @@ If `GROQ_API_KEY` is not set, the API still runs with a simple extractive fallba
 
 ## Run
 
+### Docker Compose
+
+For one-command startup, copy `.env.example` to `.env`, add your Groq key if you have one, then run:
+
+```bash
+docker compose up --build
+```
+
+Open the UI:
+
+```text
+http://localhost:8501
+```
+
+The API is available at:
+
+```text
+http://localhost:8000/docs
+```
+
+Compose starts two services: `api` for FastAPI and `frontend` for Streamlit. The local `data/` folder is mounted into the containers so uploaded documents, Chroma indexes, and SQLite chat history persist across restarts.
+
+### Local Python
+
 Start the FastAPI backend:
 
 ```bash

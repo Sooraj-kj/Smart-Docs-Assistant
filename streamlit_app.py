@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import uuid
+import os
 from typing import Any
 
 import requests
 import streamlit as st
 
 
-DEFAULT_API_URL = "http://127.0.0.1:8000"
+DEFAULT_API_URL = os.getenv("SMART_DOCS_API_URL", "http://127.0.0.1:8000")
 
 
 st.set_page_config(
